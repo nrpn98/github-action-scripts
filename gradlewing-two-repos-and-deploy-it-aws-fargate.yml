@@ -1,0 +1,99 @@
+# This workflow will build a Java project with Gradle and cache/restore any dependencies to improve the workflow execution time
+# For more information see: https://help.github.com/actions/language-and-framework-guides/building-and-testing-java-with-gradle
+# Further this workflow will deploy the build java application into AWS ECS resoucres.
+# There are two repos to build, the abc repo has some dependency with xyz, so we will gradlew xyz first and then will gradlew abc
+
+
+name: abc-serviceCI with Gradle
+
+on:
+  push:
+    branches: [ develop ] #Please change the branch name according to you requriment
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    steps:   
+      
+    - name: checkout abc-service
+      uses: actions/checkout@v2
+      with:
+        repository: repo-name #example repo-inc/abc-service
+        token: ${{ secrets.GRPC_INTERFACE_SERVICE_SECRET }} # `GH_PAT` is a secret that contains your PAT
+        path: abc-service
+     
+    - name: abc-service checkout location
+      run: |
+          pwd
+          ls -lrtha
+          
+        
+    - name: checkout xyz-service
+      uses: actions/checkout@v2
+      with:
+        repository: aeturnum-inc/xyz-service #example repo-inc/abc-service
+        token: ${{ secrets.GRPC_INTERFACE_SERVICE_SECRET }} # `GH_PAT` is a secret that contains your PAT
+        path: xyz-service
+
+    - name:  xyz-service checkout location
+      run: |
+          pwd
+          ls -lrtha
+            
+    - name: Grant execute permission for gradlew
+      run: chmod +x ./xyz-service/gradlew
+      
+    - name: Build with Gradle 
+      working-directory: xyz-service
+      run: ./gradlew build -x test      
+      
+    - name: Grant execute permission for gradlew
+      run: chmod +x ./abc-service/gradlew
+      
+    - name: Build with Gradle
+      working-directory: abc-service
+      run: ./gradlew build -x test
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+      
+    - name: Build, tag, and push image to Amazon ECR
+      id: build-image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REPOSITORY: abc-service
+        IMAGE_TAG: ${{ github.sha }}
+      run: |
+        cd abc-service
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+    - name: Download task definition
+      run: |
+        cd abc-service
+        aws ecs describe-task-definition --task-definition abc-service --query taskDefinition > task-definition.json
+        
+    - name: Fill in the new image ID in the Amazon ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: abc-service/task-definition.json
+        container-name: abc-service-container-name
+        image: ${{ steps.build-image.outputs.image }}
+
+    - name: Deploy Amazon ECS task definition
+      uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      with:
+        task-definition: ${{ steps.task-def.outputs.task-definition }}
+        service: abc-service
+        cluster: DEVELOPMENT-CLUSTER
+        wait-for-service-stability: true
